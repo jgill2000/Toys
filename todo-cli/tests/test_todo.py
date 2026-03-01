@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from todo import storage
+from todo.storage import TodoRepository
+from todo.queries import FilterOptions, filter_todos as filter_todos
 from todo.models import Todo
 
 
@@ -600,3 +602,253 @@ class TestCLIBackupRestore:
         assert code == 0
         assert len(storage.load(todo_file)) == 1
         assert storage.load(todo_file)[0].title == "Keep me"
+
+
+
+# ===========================================================================
+# TestTodoRepository — tests that use the class-based API directly
+# ===========================================================================
+
+class TestTodoRepository:
+    """Verify that ``TodoRepository`` provides the same contract as the free
+    functions while eliminating the repeated ``path=`` argument.
+
+    These tests run against a fresh temp-file repository (``repo`` fixture) so
+    they are fully isolated from the real ``~/.todo-cli/todos.json`` file.
+    """
+
+    def test_add_and_load(self, todo_file):
+        repo = TodoRepository(todo_file)
+        todo = repo.add("Repo task")
+        assert todo.id == 1
+        loaded = repo.load()
+        assert len(loaded) == 1
+        assert loaded[0].title == "Repo task"
+
+    def test_add_with_options(self, todo_file):
+        repo = TodoRepository(todo_file)
+        todo = repo.add("Repo task", priority="high", tags=["work"], due_date="2030-01-01")
+        assert todo.priority == "high"
+        assert todo.tags == ["work"]
+        assert todo.due_date == "2030-01-01"
+
+    def test_mark_done(self, todo_file):
+        repo = TodoRepository(todo_file)
+        t    = repo.add("Task")
+        done = repo.mark_done(t.id)
+        assert done.done is True
+        assert done.completed_at is not None
+        assert repo.load()[0].done is True
+
+    def test_mark_done_unknown_id(self, todo_file):
+        repo = TodoRepository(todo_file)
+        assert repo.mark_done(999) is None
+
+    def test_delete(self, todo_file):
+        repo = TodoRepository(todo_file)
+        t    = repo.add("Task")
+        deleted = repo.delete(t.id)
+        assert deleted.id == t.id
+        assert repo.load() == []
+
+    def test_delete_unknown_id(self, todo_file):
+        repo = TodoRepository(todo_file)
+        assert repo.delete(999) is None
+
+    def test_edit(self, todo_file):
+        repo = TodoRepository(todo_file)
+        t    = repo.add("Old title")
+        updated = repo.edit(t.id, title="New title", priority="high")
+        assert updated.title == "New title"
+        assert updated.priority == "high"
+        assert repo.load()[0].title == "New title"
+
+    def test_edit_clear_due(self, todo_file):
+        repo = TodoRepository(todo_file)
+        t    = repo.add("Task", due_date="2030-01-01")
+        repo.edit(t.id, due_date=None)
+        assert repo.load()[0].due_date is None
+
+    def test_edit_unknown_id(self, todo_file):
+        repo = TodoRepository(todo_file)
+        assert repo.edit(999, title="X") is None
+
+    def test_move(self, todo_file):
+        repo = TodoRepository(todo_file)
+        a = repo.add("A")
+        b = repo.add("B")
+        c = repo.add("C")
+        repo.move(a.id, 2)   # move A to position index 2 (last)
+        titles = [t.title for t in repo.load()]
+        assert titles == ["B", "C", "A"]
+
+    def test_move_unknown_id(self, todo_file):
+        repo = TodoRepository(todo_file)
+        assert repo.move(999, 0) is False
+
+    def test_snapshot_and_restore(self, todo_file):
+        repo     = TodoRepository(todo_file)
+        repo.add("Before")
+        snapshot = repo.snapshot()
+        assert len(snapshot) == 1
+
+        repo.add("After")
+        assert len(repo.load()) == 2
+
+        repo.restore_snapshot(snapshot)
+        assert len(repo.load()) == 1
+        assert repo.load()[0].title == "Before"
+
+    def test_export_json(self, todo_file):
+        repo = TodoRepository(todo_file)
+        repo.add("Export me")
+        j    = repo.export_json()
+        data = json.loads(j)
+        assert len(data) == 1
+        assert data[0]["title"] == "Export me"
+
+    def test_backup_and_restore(self, todo_file, tmp_path):
+        repo   = TodoRepository(todo_file)
+        repo.add("Persisted")
+        backup = tmp_path / "backup.json"
+        assert repo.backup(backup) is True
+        assert backup.exists()
+
+        repo.delete(repo.load()[0].id)
+        assert repo.load() == []
+
+        repo.restore(backup)
+        assert repo.load()[0].title == "Persisted"
+
+    def test_backup_missing_source(self, tmp_path):
+        """backup() returns False when the source file does not exist."""
+        repo = TodoRepository(tmp_path / "nonexistent.json")
+        assert repo.backup(tmp_path / "out.json") is False
+
+    def test_restore_missing_source(self, todo_file, tmp_path):
+        """restore() returns False when the backup file does not exist."""
+        repo = TodoRepository(todo_file)
+        assert repo.restore(tmp_path / "nonexistent.json") is False
+
+    def test_recurring_spawns_next(self, todo_file):
+        """mark_done on a recurring todo should append the next occurrence."""
+        repo = TodoRepository(todo_file)
+        t    = repo.add("Weekly", recur="weekly", due_date="2030-01-06")
+        repo.mark_done(t.id)
+        todos = repo.load()
+        assert len(todos) == 2
+        next_t = todos[1]
+        assert next_t.done is False
+        assert next_t.due_date == "2030-01-13"
+
+
+# ===========================================================================
+# TestFilterOptions — tests for the queries module
+# ===========================================================================
+
+class TestFilterOptions:
+    """Verify ``FilterOptions`` and ``filter_todos`` from ``todo.queries``.
+
+    All tests operate on in-memory lists — no filesystem needed.
+    """
+
+    def _make(self, **kwargs) -> Todo:
+        """Factory shortcut so test bodies stay concise."""
+        return storage.add.__wrapped__(**kwargs) if False else None   # placeholder
+
+    def _todos(self) -> list[Todo]:
+        """A small fixed dataset covering all filter dimensions."""
+        from todo.models import Todo as T
+        return [
+            T(id=1, title="Alpha",   done=False, priority="high",   tags=["work"],
+              due_date="2020-01-01"),   # overdue
+            T(id=2, title="Beta",    done=True,  priority="medium",  tags=["home"]),
+            T(id=3, title="Gamma",   done=False, priority="low",    tags=["work", "urgent"]),
+            T(id=4, title="Delta",   done=False, priority="high",   tags=[],
+              due_date="2099-12-31"),   # future
+            T(id=5, title="epsilon", done=False, priority="medium",  tags=[]),
+        ]
+
+    def test_no_options_returns_all(self):
+        todos = self._todos()
+        assert filter_todos(todos) == todos
+
+    def test_filter_pending(self):
+        result = filter_todos(self._todos(), FilterOptions(filter_by="pending"))
+        assert all(not t.done for t in result)
+        assert len(result) == 4
+
+    def test_filter_done(self):
+        result = filter_todos(self._todos(), FilterOptions(filter_by="done"))
+        assert all(t.done for t in result)
+        assert len(result) == 1
+
+    def test_filter_overdue(self):
+        result = filter_todos(self._todos(), FilterOptions(filter_by="overdue"))
+        # Only id=1 has an overdue date (2020-01-01) and is not done.
+        assert len(result) == 1
+        assert result[0].id == 1
+
+    def test_tag_filter(self):
+        result = filter_todos(self._todos(), FilterOptions(tag="work"))
+        assert all("work" in t.tags for t in result)
+        assert len(result) == 2
+
+    def test_priority_filter(self):
+        result = filter_todos(self._todos(), FilterOptions(priority="high"))
+        assert all(t.priority == "high" for t in result)
+        assert len(result) == 2
+
+    def test_search_title(self):
+        result = filter_todos(self._todos(), FilterOptions(search="alpha"))
+        assert len(result) == 1
+        assert result[0].title == "Alpha"
+
+    def test_search_case_insensitive(self):
+        result = filter_todos(self._todos(), FilterOptions(search="EPSILON"))
+        assert len(result) == 1
+
+    def test_search_tag(self):
+        result = filter_todos(self._todos(), FilterOptions(search="urgent"))
+        assert len(result) == 1
+        assert result[0].id == 3
+
+    def test_sort_alpha(self):
+        titles = [t.title for t in filter_todos(
+            self._todos(), FilterOptions(sort_by="alpha")
+        )]
+        assert titles == sorted(titles, key=str.lower)
+
+    def test_sort_priority(self):
+        result = filter_todos(self._todos(), FilterOptions(sort_by="priority"))
+        pris   = [t.priority for t in result]
+        rank   = {"high": 0, "medium": 1, "low": 2}
+        assert pris == sorted(pris, key=lambda p: rank[p])
+
+    def test_sort_due_undated_last(self):
+        result = filter_todos(self._todos(), FilterOptions(sort_by="due"))
+        # Todos with due dates come before undated ones.
+        dated_indices   = [i for i, t in enumerate(result) if t.due_date]
+        undated_indices = [i for i, t in enumerate(result) if not t.due_date]
+        assert max(dated_indices) < min(undated_indices)
+
+    def test_sort_position_unchanged(self):
+        todos  = self._todos()
+        result = filter_todos(todos, FilterOptions(sort_by="position"))
+        assert [t.id for t in result] == [t.id for t in todos]
+
+    def test_combined_filter_and_sort(self):
+        result = filter_todos(
+            self._todos(),
+            FilterOptions(filter_by="pending", sort_by="alpha"),
+        )
+        assert all(not t.done for t in result)
+        titles = [t.title for t in result]
+        assert titles == sorted(titles, key=str.lower)
+
+    def test_no_mutation(self):
+        """filter_todos must not mutate the original list."""
+        todos    = self._todos()
+        original = [t.id for t in todos]
+        filter_todos(todos, FilterOptions(sort_by="alpha", filter_by="pending"))
+        assert [t.id for t in todos] == original
