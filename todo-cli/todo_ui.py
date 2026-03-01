@@ -144,6 +144,14 @@ class PlaceholderEntry(tk.Entry):
         active_fg:   str = TEXT_FG,
         **kwargs,
     ) -> None:
+        """Initialise the entry, show the placeholder, and bind focus events.
+
+        Parameters
+        ----------
+        placeholder : Text shown when the field is empty and unfocused.
+        active_fg   : Foreground colour used while the user is typing.
+        **kwargs    : Passed straight through to ``tk.Entry``.
+        """
         super().__init__(master, **kwargs)
         self._placeholder    = placeholder
         self._active_fg      = active_fg
@@ -157,18 +165,21 @@ class PlaceholderEntry(tk.Entry):
     # ── Placeholder state management ──────────────────────────────────────
 
     def _show_placeholder(self) -> None:
+        """Insert placeholder text and switch to muted foreground colour."""
         self.delete(0, tk.END)
         self.insert(0, self._placeholder)
         self.config(fg=self._placeholder_fg)
         self._showing = True
 
     def _on_focus_in(self, _event: tk.Event) -> None:
+        """Clear placeholder when the user clicks into the field."""
         if self._showing:
             self.delete(0, tk.END)
             self.config(fg=self._active_fg)
             self._showing = False
 
     def _on_focus_out(self, _event: tk.Event) -> None:
+        """Restore placeholder when the field loses focus while empty."""
         if not self.get():
             self._show_placeholder()
 
@@ -194,6 +205,7 @@ class _Tooltip:
     ``wm_overrideredirect`` to appear without a title bar.
     """
     def __init__(self, widget: tk.Widget, text: str) -> None:
+        """Attach a tooltip to *widget* that shows *text* on hover."""
         self._widget = widget
         self._text   = text
         self._win: tk.Toplevel | None = None
@@ -201,6 +213,7 @@ class _Tooltip:
         widget.bind("<Leave>", self._hide)
 
     def _show(self, _event: tk.Event) -> None:
+        """Create and position the tooltip window below the widget."""
         if self._win:
             return   # already visible
         x = self._widget.winfo_rootx() + 20
@@ -215,6 +228,7 @@ class _Tooltip:
         ).pack()
 
     def _hide(self, _event: tk.Event) -> None:
+        """Destroy the tooltip window."""
         if self._win:
             self._win.destroy()
             self._win = None
@@ -234,8 +248,8 @@ class EditDialog(tk.Toplevel):
     """
 
     def __init__(self, parent: tk.Tk, todo: Todo | None = None) -> None:
+        """Open the dialog, pre-populating fields from *todo* if given."""
         super().__init__(parent)
-        self.title("Edit Todo" if todo else "New Todo")
         self.resizable(False, False)
         self.configure(bg=BG)
         self.grab_set()   # modal: block the parent window
@@ -400,6 +414,7 @@ class StatsDialog(tk.Toplevel):
     """Read-only statistics summary for the current todo list."""
 
     def __init__(self, parent: tk.Tk, todos: list[Todo]) -> None:
+        """Display statistics for *todos* in a modal dialog."""
         super().__init__(parent)
         self.title("Stats")
         self.resizable(False, False)
@@ -409,6 +424,7 @@ class StatsDialog(tk.Toplevel):
         self.bind("<Escape>", lambda _: self.destroy())
 
     def _build(self, todos: list[Todo]) -> None:
+        """Compute statistics and populate the dialog with labelled rows."""
         from collections import Counter
 
         total      = len(todos)
@@ -475,6 +491,13 @@ class TodoApp(tk.Tk):
     """
 
     def __init__(self, path: Path = DEFAULT_PATH) -> None:
+        """Initialise the application, build the UI, and load the first list.
+
+        Parameters
+        ----------
+        path : Path to the JSON todos file to open on launch.  Defaults to
+               ``~/.todo-cli/todos.json`` (or ``$TODO_FILE`` if set).
+        """
         super().__init__()
         # The repository is the single point of contact with storage.
         self._repo            = TodoRepository(path)
@@ -494,6 +517,7 @@ class TodoApp(tk.Tk):
     # ── Construction (called once) ─────────────────────────────────────────
 
     def _build_ui(self) -> None:
+        """Construct the full widget tree (called once at startup)."""
         self._build_toolbar()
         self._build_filter_bar()
         self._build_add_bar()
@@ -670,6 +694,16 @@ class TodoApp(tk.Tk):
     # ── Keyboard shortcuts ─────────────────────────────────────────────────
 
     def _bind_shortcuts(self) -> None:
+        """Register all global keyboard shortcuts for the main window.
+
+        Ctrl+N  — focus the add entry
+        Ctrl+Z  — undo last action
+        Ctrl+E  — edit the selected todo
+        Delete  — delete the selected todo
+        Space   — toggle done on the selected todo
+        Escape  — clear the search box
+        F5      — force refresh from disk
+        """
         self.bind("<Control-n>", lambda _: (
             self._entry.focus_set(), self._entry.select_range(0, tk.END)))
         self.bind("<Control-z>", lambda _: self._undo())
@@ -891,6 +925,7 @@ class TodoApp(tk.Tk):
         self._refresh()
 
     def _mark_done(self, todo_id: int) -> None:
+        """Snapshot state, mark the todo complete, and refresh the list."""
         self._undo_snapshot = self._repo.snapshot()
         self._repo.mark_done(todo_id)
         self._refresh()
@@ -919,6 +954,7 @@ class TodoApp(tk.Tk):
             self._refresh()
 
     def _move(self, todo_id: int, new_idx: int) -> None:
+        """Snapshot state, reorder the todo to *new_idx*, and refresh."""
         self._undo_snapshot = self._repo.snapshot()
         self._repo.move(todo_id, new_idx)
         self._refresh()
@@ -954,6 +990,7 @@ class TodoApp(tk.Tk):
         self._refresh()
 
     def _new_list(self) -> None:
+        """Prompt for a file path and switch to a new (empty) list."""
         path = filedialog.asksaveasfilename(
             title="New List", defaultextension=".json",
             filetypes=[("JSON", "*.json")],
@@ -962,6 +999,7 @@ class TodoApp(tk.Tk):
             self._switch_list(Path(path))
 
     def _open_list(self) -> None:
+        """Prompt for an existing JSON file and switch to it."""
         path = filedialog.askopenfilename(
             title="Open List", filetypes=[("JSON", "*.json")],
         )
@@ -969,6 +1007,7 @@ class TodoApp(tk.Tk):
             self._switch_list(Path(path))
 
     def _backup(self) -> None:
+        """Prompt for a destination path and copy the current todos file there."""
         dest = filedialog.asksaveasfilename(
             title="Save Backup", defaultextension=".json",
             filetypes=[("JSON", "*.json")],
@@ -981,6 +1020,7 @@ class TodoApp(tk.Tk):
                 messagebox.showwarning("Backup", "No todos file to back up.", parent=self)
 
     def _restore(self) -> None:
+        """Prompt for a backup file and overwrite the current list from it."""
         src = filedialog.askopenfilename(
             title="Restore Backup", filetypes=[("JSON", "*.json")],
         )
@@ -994,6 +1034,7 @@ class TodoApp(tk.Tk):
                 messagebox.showwarning("Restore", "Backup file not found.", parent=self)
 
     def _export(self) -> None:
+        """Prompt for a file path and write the full list as JSON to it."""
         path = filedialog.asksaveasfilename(
             defaultextension=".json",
             filetypes=[("JSON", "*.json")],
@@ -1004,6 +1045,7 @@ class TodoApp(tk.Tk):
             self._flash(f"Exported to {Path(path).name}")
 
     def _show_stats(self) -> None:
+        """Open the statistics dialog for the current list."""
         StatsDialog(self, self._repo.load())
 
     # ── Selection helpers ──────────────────────────────────────────────────
@@ -1014,6 +1056,7 @@ class TodoApp(tk.Tk):
         self._refresh()
 
     def _edit_selected(self) -> None:
+        """Open the edit dialog for the currently selected todo (Ctrl+E)."""
         if not self._selected_id:
             return
         todos = self._repo.load()
@@ -1022,10 +1065,12 @@ class TodoApp(tk.Tk):
             self._open_edit(todo)
 
     def _delete_selected(self) -> None:
+        """Delete the currently selected todo (Delete key)."""
         if self._selected_id:
             self._delete_todo(self._selected_id)
 
     def _done_selected(self) -> None:
+        """Mark the currently selected todo as done (Space key)."""
         if self._selected_id:
             self._mark_done(self._selected_id)
 
@@ -1051,6 +1096,7 @@ class TodoApp(tk.Tk):
             return
 
         def _make_icon() -> "Image.Image":
+            """Draw a 64×64 blue circle with a white checkmark — the tray icon."""
             # Simple blue circle with a white checkmark glyph.
             img  = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
@@ -1069,12 +1115,15 @@ class TodoApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
 
     def _hide_to_tray(self) -> None:
+        """Hide the main window without quitting (window will live in the tray)."""
         self.withdraw()
 
     def _show_from_tray(self, *_) -> None:
+        """Restore the main window from the system tray (runs on tray thread → defer with after)."""
         self.after(0, self.deiconify)
 
     def _quit_app(self, *_) -> None:
+        """Stop the tray icon (if present) and destroy the main window."""
         if _HAS_TRAY and hasattr(self, "_tray"):
             self._tray.stop()
         self.after(0, self.destroy)
@@ -1085,6 +1134,7 @@ class TodoApp(tk.Tk):
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    """Create the TodoApp and enter the Tkinter main loop."""
     app = TodoApp()
     app.mainloop()
 
